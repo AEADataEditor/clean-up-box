@@ -261,19 +261,20 @@ class BoxCleanup:
             self.logger.error(f"Error accessing Box folder: {e}")
             sys.exit(1)
     
-    def check_jira_purge_status(self, case_number: str) -> bool:
+    def check_jira_purge_status(self, case_number: str, verbose: bool = False) -> Tuple[bool, str]:
         """
         Check if a case is ready for purging using jira_purge_query.py.
         
         Args:
             case_number: Case number (just the digits)
+            verbose: If True, return full output from jira_purge_query.py
             
         Returns:
-            True if ready for purge, False otherwise
+            Tuple of (is_ready: bool, output: str)
         """
         if self.skip_jira:
             self.logger.warning(f"Skipping Jira check for aearep-{case_number} (--skip-jira-check)")
-            return True
+            return True, "Skipped (--skip-jira-check)"
             
         # Check if jira_purge_query.py exists
         if not os.path.exists(JIRA_PURGE_QUERY_PATH):
@@ -281,9 +282,14 @@ class BoxCleanup:
             sys.exit(1)
         
         try:
-            # Run jira_purge_query.py in quiet mode
+            # Run jira_purge_query.py (quiet mode unless verbose requested)
+            args = [JIRA_PURGE_QUERY_PATH]
+            if not verbose:
+                args.append('-q')
+            args.append(f'aearep-{case_number}')
+            
             result = subprocess.run(
-                [JIRA_PURGE_QUERY_PATH, '-q', f'aearep-{case_number}'],
+                args,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -292,21 +298,25 @@ class BoxCleanup:
             # Exit code 0 means ready for purge
             is_ready = result.returncode == 0
             
-            if is_ready:
-                self.logger.debug(f"Jira status: aearep-{case_number} is READY for purge")
-            else:
-                self.logger.debug(f"Jira status: aearep-{case_number} is NOT ready for purge")
-                if result.stderr:
-                    self.logger.debug(f"  Error output: {result.stderr.strip()}")
+            # Get output (stdout or stderr)
+            output = result.stdout.strip() if result.stdout else result.stderr.strip()
             
-            return is_ready
+            if not verbose:
+                if is_ready:
+                    self.logger.debug(f"Jira status: aearep-{case_number} is READY for purge")
+                else:
+                    self.logger.debug(f"Jira status: aearep-{case_number} is NOT ready for purge")
+                    if result.stderr:
+                        self.logger.debug(f"  Error output: {result.stderr.strip()}")
+            
+            return is_ready, output
             
         except subprocess.TimeoutExpired:
             self.logger.error(f"Timeout checking Jira status for aearep-{case_number}")
-            return False
+            return False, "Timeout"
         except Exception as e:
             self.logger.error(f"Error checking Jira status for aearep-{case_number}: {e}")
-            return False
+            return False, str(e)
     
     def classify_files_recursive(self, folder: Folder) -> Tuple[List[Dict], List[Dict]]:
         """
@@ -498,7 +508,8 @@ class BoxCleanup:
         self.stats['folders_checked'] += 1
         
         # Check Jira status
-        if not self.check_jira_purge_status(case_number):
+        is_ready, _ = self.check_jira_purge_status(case_number)
+        if not is_ready:
             self.logger.info(f"  ✗ Not ready for purge - skipping")
             return False
         
@@ -534,6 +545,43 @@ class BoxCleanup:
             self.logger.info(f"  No data files to delete")
         
         return True
+    
+    def list_cases(self, specific_case: Optional[str] = None):
+        """
+        List all cases and their Jira status without making any changes.
+        
+        Args:
+            specific_case: If provided, only list this specific case number
+        """
+        # Authenticate
+        self.authenticate_box()
+        
+        # Find case folders
+        case_folders = self.find_case_folders(specific_case)
+        
+        if not case_folders:
+            self.logger.warning("No case folders found")
+            return
+        
+        self.logger.info(f"\nChecking Jira status for {len(case_folders)} case(s)...\n")
+        
+        # Check each case
+        ready_count = 0
+        for folder_id, folder_name, case_number in case_folders:
+            # Check Jira status with verbose output
+            is_ready, output = self.check_jira_purge_status(case_number, verbose=True)
+            
+            # Print the output from jira_purge_query.py
+            if output:
+                print(output)
+            
+            if is_ready:
+                ready_count += 1
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print(f"Summary: {ready_count}/{len(case_folders)} case(s) ready for purge")
+        print(f"{'='*60}")
     
     def run(self, specific_case: Optional[str] = None, auto_confirm: bool = False):
         """
@@ -653,6 +701,12 @@ Environment Variables Required:
     )
     
     parser.add_argument(
+        '--list',
+        action='store_true',
+        help='List all cases and their Jira status without making any changes'
+    )
+    
+    parser.add_argument(
         '--case',
         type=str,
         metavar='NUMBER',
@@ -679,10 +733,16 @@ Environment Variables Required:
             print(f"Error: --case must be a number (e.g., 1234), not '{args.case}'")
             sys.exit(1)
     
-    # Create and run cleanup
+    # Create cleanup instance
     cleanup = BoxCleanup(test_mode=args.test, skip_jira=args.skip_jira_check)
     
     try:
+        # Handle --list mode
+        if args.list:
+            cleanup.list_cases(specific_case=args.case)
+            return
+        
+        # Normal cleanup mode
         cleanup.run(specific_case=args.case, auto_confirm=args.yes)
     except KeyboardInterrupt:
         cleanup.logger.info("\n\nInterrupted by user")
