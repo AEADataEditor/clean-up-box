@@ -21,9 +21,12 @@ This script automates the process of cleaning up Box folders for cases that have
 pip install 'boxsdk[jwt]'
 ```
 
+and [`jira_purge_query.py`](https://github.com/AEADataEditor/editor-scripts) must be in your path.
+
 ### Environment Variables
 
 #### Box Authentication (required)
+
 ```bash
 export BOX_FOLDER_PRIVATE="your_root_folder_id"
 export BOX_PRIVATE_KEY_ID="your_key_id"
@@ -37,6 +40,7 @@ export BOX_PRIVATE_JSON="base64_encoded_config_json"
 ```
 
 #### Jira Authentication (required for jira_purge_query.py)
+
 ```bash
 export JIRA_USERNAME="your_email@example.com"
 export JIRA_API_KEY="your_jira_api_token"
@@ -45,6 +49,14 @@ export JIRA_API_KEY="your_jira_api_token"
 Get your Jira API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
 ## Usage
+
+### Clone this repository
+
+```bash
+git clone https://github.com/AEADataEditor/clean-up-box.git
+cd clean-up-box
+```
+
 
 ### Test Mode (Recommended First!)
 
@@ -82,6 +94,32 @@ This processes only `aearep-1234`.
 python3 clean_box_folders.py --yes
 ```
 
+### List Cases and Status
+
+To see which cases are in Box and check their Jira status without making any changes:
+
+```bash
+python3 clean_box_folders.py --list
+```
+
+This will:
+- Scan Box for all case folders
+- Query Jira for each case's purge status
+- Display the full output from `jira_purge_query.py` for each case
+- Show a summary of how many cases are ready
+
+Example output:
+```
+✗ [FAIL] AEAREP-6645: Neither this issue nor linked revisions passed through required statuses (Current MCstatus: Done; Current MCRecommendationV2: N/A)
+✓ [OK] AEAREP-2124: Ready for purge
+  - Current status: Done; Current MCRecommendationV2: Accept
+```
+
+You can also check a specific case:
+```bash
+python3 clean_box_folders.py --list --case 6645
+```
+
 ### Advanced Options
 
 ```bash
@@ -89,9 +127,57 @@ python3 clean_box_folders.py --yes
 python3 clean_box_folders.py --skip-jira-check --test
 ```
 
+## Command-Line Help
+
+Full command-line options available:
+
+```
+usage: clean_box_folders.py [-h] [--test] [--list] [--case NUMBER] [--yes]
+                            [--skip-jira-check]
+
+Clean up Box folders for completed Jira cases
+
+options:
+  -h, --help         show this help message and exit
+  --test             Test mode: show what would be done without making changes
+  --list             List all cases and their Jira status without making any
+                     changes
+  --case NUMBER      Process only this specific case number (e.g., 1234 for
+                     aearep-1234)
+  --yes, -y          Skip confirmation prompt
+  --skip-jira-check  Skip Jira status checks (process all folders found) - for
+                     testing only
+
+Examples:
+  # Test mode (dry run - no modifications)
+  clean_box_folders.py --test
+
+  # Process all ready cases
+  clean_box_folders.py
+
+  # Process specific case
+  clean_box_folders.py --case 1234
+
+  # Skip confirmation prompt
+  clean_box_folders.py --yes
+
+Environment Variables Required:
+  Box Authentication:
+    BOX_FOLDER_PRIVATE - Root Box folder ID
+    BOX_PRIVATE_KEY_ID - JWT public key ID
+    BOX_ENTERPRISE_ID - Enterprise ID
+    BOX_CONFIG_PATH - Directory containing config JSON file
+    (or BOX_PRIVATE_JSON - Base64 encoded config)
+    
+  Jira Authentication:
+    JIRA_USERNAME - Your Jira email address
+    JIRA_API_KEY - API token
+```
+
 ## File Classification
 
 ### Data Files (Will be DELETED)
+
 - Statistical data: `.csv`, `.dta`, `.sas7bdat`, `.rds`, `.rdata`, `.mat`, `.sav`
 - Compressed: `.zip`, `.gz`, `.tar`, `.7z`, `.rar`
 - Databases: `.db`, `.sqlite`, `.sql`
@@ -99,6 +185,7 @@ python3 clean_box_folders.py --skip-jira-check --test
 - Other: `.json`, `.xml`, `.xlsx`
 
 ### Documents (Will be KEPT)
+
 - Documents: `.pdf`, `.docx`, `.doc`, `.txt`, `.md`, `.rtf`
 - LaTeX: `.tex`, `.bib`, `.aux`, `.log`
 - Presentations: `.pptx`, `.ppt`
@@ -149,7 +236,17 @@ Console output shows:
 
 ## Examples
 
-### Example 1: Initial Exploration
+### Example 1: Check Status First
+
+```bash
+# List all cases and check which are ready for purge
+python3 clean_box_folders.py --list
+
+# Check specific case
+python3 clean_box_folders.py --list --case 1234
+```
+
+### Example 2: Initial Exploration
 ```bash
 # See what cases exist and which are ready
 python3 clean_box_folders.py --test
@@ -158,7 +255,7 @@ python3 clean_box_folders.py --test
 cat box_cleanup_*.log
 ```
 
-### Example 2: Process Single Case
+### Example 3: Process Single Case
 ```bash
 # Test a specific case first
 python3 clean_box_folders.py --case 1234 --test
@@ -167,7 +264,7 @@ python3 clean_box_folders.py --case 1234 --test
 python3 clean_box_folders.py --case 1234
 ```
 
-### Example 3: Batch Processing
+### Example 4: Batch Processing
 ```bash
 # Test all ready cases
 python3 clean_box_folders.py --test
@@ -177,7 +274,7 @@ python3 clean_box_folders.py
 # (You'll be prompted to confirm)
 ```
 
-### Example 4: Automated Batch (Use with Caution!)
+### Example 5: Automated Batch (Use with Caution!)
 ```bash
 # Skip confirmation - useful for scheduled jobs
 python3 clean_box_folders.py --yes
@@ -186,6 +283,7 @@ python3 clean_box_folders.py --yes
 ## Output
 
 ### Console Output
+
 ```
 2026-02-19 10:30:00 - INFO - Box Cleanup Script Started
 2026-02-19 10:30:00 - INFO - Log file: box_cleanup_20260219_103000.log
@@ -221,23 +319,28 @@ Errors:                 0
 ## Troubleshooting
 
 ### "BOX_FOLDER_PRIVATE environment variable not set"
+
 Set the required Box environment variables. Check your `.bashrc` or `.zshrc`.
 
 ### "jira_purge_query.py not found"
-Ensure `/home/vilhuber/bin/aea-scripts/jira_purge_query.py` exists and is in your PATH.
+
+Ensure `jira_purge_query.py` exists and is in your PATH. Typically in `$HOME/bin` or `$HOME/bin/editor-scripts`.
 
 ### "Error: boxsdk not installed"
+
 ```bash
 pip install 'boxsdk[jwt]'
 ```
 
 ### "Failed to authenticate with BOX_PRIVATE_JSON"
+
 Check that:
 1. The base64 encoding is correct
 2. The JSON contains valid credentials
 3. Your service account has access to the folder
 
 ### "Folder already exists in '1Completed'"
+
 The folder was already moved previously. The script will skip it and continue.
 
 ## Development Notes
@@ -261,6 +364,5 @@ python3 -c "import clean_box_folders; print('Syntax OK')"
 
 ## Related Scripts
 
-- `download_box_private.py` - Downloads content from Box folders
-- `jira_purge_query.py` - Checks if Jira cases are ready for purging
-- `jira_clean_box.sh` - (Empty shell script, replaced by this Python script)
+- `download_box_private.py` - Downloads content from Box folders (not required; present in each [template repository](https://github.com/AEADataEditor/replication-template))
+- `jira_purge_query.py` - Checks if Jira cases are ready for purging (REQUIRED)
