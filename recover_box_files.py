@@ -657,6 +657,32 @@ class BoxRecovery:
             self.logger.error(f"Error searching for case folder in '1Completed': {e}")
             return None
     
+    def check_file_exists_in_folder(self, folder_id: str, file_name: str, file_type: str = 'file') -> Optional[str]:
+        """
+        Check if a file or folder with the given name exists in the specified folder.
+        
+        Args:
+            folder_id: ID of folder to search in
+            file_name: Name of file/folder to find
+            file_type: 'file' or 'folder'
+            
+        Returns:
+            Item ID if found, None otherwise
+        """
+        try:
+            folder = self.box_client.folder(folder_id)
+            items = folder.get_items(limit=1000, fields=['id', 'name', 'type'])
+            
+            for item in items:
+                if item.type == file_type and item.name == file_name:
+                    return item.id
+            
+            return None
+            
+        except BoxAPIException as e:
+            self.logger.debug(f"Error checking if {file_type} exists in folder: {e}")
+            return None
+    
     def restore_item(self, item: Dict, target_folder_id: Optional[str]) -> bool:
         """
         Restore a trashed item to the specified target folder.
@@ -680,17 +706,44 @@ class BoxRecovery:
             self.logger.error(f"Cannot restore {item_type} '{item_name}': target folder not available")
             return False
         
+        # Check if the file already exists in the target folder
+        existing_id = self.check_file_exists_in_folder(target_folder_id, item_name, item_type)
+        if existing_id:
+            self.logger.info(f"✓ {item_type.capitalize()} '{item_name}' already exists in target folder (ID: {existing_id})")
+            self.stats['items_restored'] += 1
+            return True
+        
         try:
-            # Get the trashed item object
-            if item_type == 'folder':
-                trashed_item = self.box_client.folder(item_id)
+            # Restore from trash using direct API call
+            # The Box API requires POST to /files/{id} or /folders/{id} to restore from trash
+            url = f'https://api.box.com/2.0/{item_type}s/{item_id}'
+            
+            # Prepare the restore request body
+            restore_data = {
+                'parent': {
+                    'id': target_folder_id
+                }
+            }
+            
+            # Make the POST request using the Box session
+            response = self.box_client._session.post(url, data=json.dumps(restore_data))
+            
+            # Check for errors in the response
+            if response.status_code >= 400:
+                error_data = response.json() if hasattr(response, 'json') else {}
+                error_msg = error_data.get('message', f'HTTP {response.status_code}')
+                raise Exception(f"Box API error: {error_msg}")
+            
+            restored_data = response.json()
+            restored_id = restored_data.get('id', item_id)
+            
+            # Verify the file was restored to the target folder
+            verification_id = self.check_file_exists_in_folder(target_folder_id, item_name, item_type)
+            if verification_id:
+                self.logger.info(f"✓ Restored {item_type} '{item_name}' (ID: {restored_id}) and verified in target folder")
             else:
-                trashed_item = self.box_client.file(item_id)
+                self.logger.warning(f"⚠ Restored {item_type} '{item_name}' (ID: {restored_id}) but could not verify in target folder")
             
-            # Restore with new parent
-            restored = trashed_item.restore(parent_folder=self.box_client.folder(target_folder_id))
-            
-            self.logger.info(f"✓ Restored {item_type} '{item_name}' (ID: {restored.id})")
             self.stats['items_restored'] += 1
             return True
             
