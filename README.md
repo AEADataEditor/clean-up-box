@@ -362,7 +362,85 @@ python3 -c "import clean_box_folders; print('Syntax OK')"
 - Review log files before sharing (may contain folder/file names)
 - Test mode logs may reveal folder structure
 
+## File Recovery
+
+### Overview
+
+If files were accidentally deleted by the cleanup script, they can be recovered from Box trash within the retention period (typically 30-90 days). The `recover_box_files.py` script automates this process.
+
+### Usage
+
+The recovery script requires a case number and looks up the Box Folder ID from Jira's "Restricted data Box ID" custom field, along with the "Bitbucket short name" field which contains the actual Box folder name. Note that the Jira case number (e.g., 8040) may differ from the Box folder name (e.g., "7712").
+
+**List deleted files for a case:**
+```bash
+python3.12 recover_box_files.py --case 8040 --list
+```
+
+**Test mode (dry run):**
+```bash
+python3.12 recover_box_files.py --case 8040 --test
+```
+
+**Restore files to 1Completed folder:**
+```bash
+python3.12 recover_box_files.py --case 8040
+```
+
+**Look back 14 days instead of default 7:**
+```bash
+python3.12 recover_box_files.py --case 8040 --days 14
+```
+
+**Skip confirmation prompt:**
+```bash
+python3.12 recover_box_files.py --case 8040 --yes
+```
+
+### How It Works
+
+**Important**: The cleanup script moves case folders to '1Completed' and then **deletes the data files inside**. The recovery script finds those deleted files and restores them back to the case folder.
+
+1. **Jira Lookup**: Queries Jira issue (e.g., "aearep-8040") to retrieve:
+   - Box Folder ID from "Restricted data Box ID" custom field
+   - Box folder name from "Bitbucket short name" custom field (may be different, e.g., "7712")
+2. **Trash Search**: Gets all trashed items from Box and filters by:
+   - Deleted in the last N days (default: 7)
+   - Deleted by user "aeadata"
+   - Files that belonged to the specified folder (checks folder ID and path)
+3. **Display**: Shows all matching deleted files with details
+4. **Restore**: Restores the files back to their case folder (which should be in '1Completed')
+
+### Requirements
+
+Same as the cleanup script, plus:
+- `jira` Python package: `pip install jira`
+- `JIRA_USERNAME` and `JIRA_API_KEY` environment variables
+- Optional: `JIRA_SERVER` (defaults to https://aeadataeditors.atlassian.net)
+
+### Command-Line Options
+
+```
+usage: recover_box_files.py [-h] --case NUMBER [--days N] [--list] [--test] [--yes]
+
+options:
+  --case NUMBER    Jira case number (e.g., 8040 for aearep-8040) [REQUIRED]
+  --days N         Number of days to look back (default: 7)
+  --list           List deleted items only, do not restore
+  --test           Test mode: show what would be done without changes
+  --yes, -y        Skip confirmation prompt
+```
+
+### Important Notes
+
+- **File restoration**: The script finds and restores individual **files** that were deleted from the case folder (the folder itself remains in '1Completed')
+- **Destination**: Files are restored back to the case folder in '1Completed' (e.g., '1Completed/aearep-7712/')
+- **Service account context**: The cleanup script runs as service account "aeadata", so all deletions appear to be by that user
+- **Trash retention**: Items in Box trash are auto-deleted after the retention period (typically 30-90 days)
+- **Name conflicts**: If a file with the same name already exists in the folder, restoration will be skipped with a warning
+
 ## Related Scripts
 
 - `download_box_private.py` - Downloads content from Box folders (not required; present in each [template repository](https://github.com/AEADataEditor/replication-template))
 - `jira_purge_query.py` - Checks if Jira cases are ready for purging (REQUIRED)
+- `recover_box_files.py` - Recovers deleted files from Box trash (NEW)
