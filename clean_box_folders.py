@@ -8,6 +8,7 @@ This script cleans up Box folders for completed Jira cases by:
 3. For ready cases:
    - Deleting data files (CSV, DTA, ZIP, etc.)
    - Moving the folder (with remaining documents) to the '1Completed' subfolder
+   - Prompting to set the Jira "Was data deleted?" field to "Yes"
 
 Usage:
     # Test mode (dry run - no modifications)
@@ -30,9 +31,10 @@ Environment Variables Required:
         BOX_CONFIG_PATH - Directory containing config JSON file
         BOX_PRIVATE_JSON - Base64 encoded config (alternative to config file)
         
-    Jira Authentication (for jira_purge_query.py):
+    Jira Authentication:
         JIRA_USERNAME - Your Jira email address
         JIRA_API_KEY - API token
+        JIRA_SERVER - Jira server URL (default: https://aeadataeditors.atlassian.net)
 """
 
 import os
@@ -61,9 +63,17 @@ except ImportError:
     print("Error: boxsdk[jwt] not installed. Install with: pip install 'boxsdk[jwt]'")
     sys.exit(1)
 
+try:
+    from jira import JIRA
+    from jira.exceptions import JIRAError
+    JIRA_AVAILABLE = True
+except ImportError:
+    JIRA_AVAILABLE = False
+
 
 # Configuration
 JIRA_PURGE_QUERY_PATH = '/home/vilhuber/bin/aea-scripts/jira_purge_query.py'
+JIRA_DATA_DELETED_FIELD = 'Was data deleted?'
 
 # File extensions for classification
 DATA_FILE_EXTENSIONS = {
@@ -104,6 +114,8 @@ class BoxCleanup:
         self.test_mode = test_mode
         self.skip_jira = skip_jira
         self.client = None
+        self.jira_client = None
+        self._jira_field_map: Optional[Dict[str, str]] = None
         self.root_folder_id = None
         self.stats = {
             'folders_found': 0,
@@ -112,6 +124,7 @@ class BoxCleanup:
             'folders_moved': 0,
             'files_deleted': 0,
             'bytes_deleted': 0,
+            'jira_flags_set': 0,
             'errors': 0,
         }
         
@@ -318,6 +331,162 @@ class BoxCleanup:
             self.logger.error(f"Error checking Jira status for aearep-{case_number}: {e}")
             return False, str(e)
     
+    def authenticate_jira(self) -> bool:
+        """
+        Authenticate to Jira using API token.
+        
+        Returns:
+            True if authentication successful, False otherwise
+        """
+        if not JIRA_AVAILABLE:
+            self.logger.error("jira library not installed. Install with: pip install jira")
+            return False
+
+        jira_username = os.environ.get('JIRA_USERNAME')
+        jira_api_key = os.environ.get('JIRA_API_KEY')
+        jira_server = os.environ.get('JIRA_SERVER', 'https://aeadataeditors.atlassian.net')
+
+        if not jira_username or not jira_api_key:
+            self.logger.error("JIRA_USERNAME and JIRA_API_KEY environment variables required")
+            return False
+
+        try:
+            self.jira_client = JIRA(
+                server=jira_server,
+                basic_auth=(jira_username, jira_api_key),
+                options={'verify': True}
+            )
+            myself = self.jira_client.myself()
+            self.logger.info(f"✓ Authenticated to Jira as: {myself['displayName']}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to authenticate to Jira: {e}")
+            self.jira_client = None
+            self._jira_field_map = None
+            return False
+
+    def set_data_deleted_flag(self, case_number: str) -> bool:
+        """
+        Set the Jira field 'Was data deleted?' to 'Yes' for the given case.
+        
+        Args:
+            case_number: Case number (just digits, e.g., "1234")
+            
+        Returns:
+            True if field was set successfully, False otherwise
+        """
+        if self.test_mode:
+            self.logger.info(
+                f"  [DRY RUN] Would set '{JIRA_DATA_DELETED_FIELD}' to 'Yes' "
+                f"for aearep-{case_number}"
+            )
+            return True
+
+        if not self.jira_client:
+            if not self.authenticate_jira():
+                return False
+
+        issue_key = f"aearep-{case_number}"
+
+        try:
+            # Build field map once and cache it for subsequent calls
+            if self._jira_field_map is None:
+                all_fields = self.jira_client.fields()
+                self._jira_field_map = {field['name']: field['id'] for field in all_fields}
+
+            field_id = self._jira_field_map.get(JIRA_DATA_DELETED_FIELD)
+            if not field_id:
+                self.logger.error(
+                    f"Custom field '{JIRA_DATA_DELETED_FIELD}' not found in Jira"
+                )
+                self.logger.debug(
+                    f"Available fields containing 'data' or 'delete': "
+                    f"{[k for k in self._jira_field_map.keys() if 'data' in k.lower() or 'delet' in k.lower()]}"
+                )
+                return False
+
+            issue = self.jira_client.issue(issue_key)
+            issue.update(fields={field_id: {'value': 'Yes'}})
+            self.logger.info(
+                f"  ✓ Set '{JIRA_DATA_DELETED_FIELD}' to 'Yes' for {issue_key}"
+            )
+            return True
+
+        except JIRAError as e:
+            if e.status_code == 404:
+                self.logger.error(f"Jira issue {issue_key} not found")
+            else:
+                self.logger.error(f"Error updating Jira issue {issue_key}: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error setting Jira flag for {issue_key}: {e}"
+            )
+            return False
+
+    def query_and_set_data_deleted(self, case_number: str, folder_name: str,
+                                    auto_confirm: bool = False) -> bool:
+        """
+        Prompt the user about setting the 'Was data deleted?' Jira flag.
+        
+        Reminds the user that all local copies of the data must be manually
+        deleted before setting the flag, then sets the flag if confirmed.
+        
+        Args:
+            case_number: Case number (just digits, e.g., "1234")
+            folder_name: Folder name for display (e.g., 'aearep-1234')
+            auto_confirm: If True, set the flag without prompting
+            
+        Returns:
+            True if flag was set (or would be set in test mode), False otherwise
+        """
+        issue_key = f"aearep-{case_number}"
+
+        print(f"\n{'='*60}")
+        print(f"IMPORTANT: Manual steps required for {issue_key}")
+        print(f"{'='*60}")
+        print(
+            "Data files have been deleted from Box. Before marking this\n"
+            "case as data-deleted in Jira, ensure that ALL local copies\n"
+            "of the data on every system where they may have been\n"
+            "downloaded or stored have also been manually deleted."
+        )
+        print(f"{'='*60}\n")
+
+        if self.test_mode:
+            self.logger.info(
+                f"  [DRY RUN] Would prompt to set '{JIRA_DATA_DELETED_FIELD}' "
+                f"for {issue_key}"
+            )
+            return True
+
+        if self.skip_jira:
+            self.logger.info(
+                f"  Skipping '{JIRA_DATA_DELETED_FIELD}' update (--skip-jira-check)"
+            )
+            return False
+
+        if auto_confirm:
+            self.logger.info(
+                f"  Setting '{JIRA_DATA_DELETED_FIELD}' to 'Yes' for {issue_key} (--yes)"
+            )
+            result = self.set_data_deleted_flag(case_number)
+        else:
+            response = input(
+                f"Set '{JIRA_DATA_DELETED_FIELD}' to 'Yes' in Jira for {issue_key}? [y/N]: "
+            )
+            if response.lower() in ['y', 'yes']:
+                result = self.set_data_deleted_flag(case_number)
+            else:
+                self.logger.info(
+                    f"  Skipped setting '{JIRA_DATA_DELETED_FIELD}' for {issue_key}"
+                )
+                return False
+
+        if result:
+            self.stats['jira_flags_set'] += 1
+        return result
+
     def classify_files_recursive(self, folder: Folder) -> Tuple[List[Dict], List[Dict]]:
         """
         Recursively classify files in a folder and its subfolders.
@@ -487,16 +656,19 @@ class BoxCleanup:
                 self.stats['errors'] += 1
                 return False
     
-    def process_case_folder(self, folder_id: str, folder_name: str, 
-                           case_number: str, completed_folder_id: Optional[str]) -> bool:
+    def process_case_folder(self, folder_id: str, folder_name: str,
+                           case_number: str, completed_folder_id: Optional[str],
+                           auto_confirm: bool = False) -> bool:
         """
-        Process a single case folder: check Jira status, delete data files, move to completed.
+        Process a single case folder: check Jira status, delete data files,
+        move to completed, and prompt to set the 'Was data deleted?' Jira flag.
         
         Args:
             folder_id: Box folder ID
             folder_name: Folder name (e.g., 'aearep-1234')
             case_number: Case number (just digits)
             completed_folder_id: ID of '1Completed' folder
+            auto_confirm: If True, skip interactive prompts
             
         Returns:
             True if folder was processed (ready for purge), False otherwise
@@ -543,6 +715,9 @@ class BoxCleanup:
             self.logger.info(f"  ✓ Deleted {deleted}/{len(data_files)} data files ({self._format_size(total_size)})")
         else:
             self.logger.info(f"  No data files to delete")
+        
+        # Query user and optionally set the "Was data deleted?" Jira flag
+        self.query_and_set_data_deleted(case_number, folder_name, auto_confirm)
         
         return True
     
@@ -625,7 +800,10 @@ class BoxCleanup:
         # Process each case folder
         for folder_id, folder_name, case_number in case_folders:
             try:
-                self.process_case_folder(folder_id, folder_name, case_number, completed_folder_id)
+                self.process_case_folder(
+                    folder_id, folder_name, case_number,
+                    completed_folder_id, auto_confirm
+                )
             except Exception as e:
                 self.logger.error(f"Unexpected error processing {folder_name}: {e}")
                 self.stats['errors'] += 1
@@ -645,6 +823,7 @@ class BoxCleanup:
         self.logger.info(f"Folders moved:          {self.stats['folders_moved']}")
         self.logger.info(f"Data files deleted:     {self.stats['files_deleted']}")
         self.logger.info(f"Total bytes deleted:    {self._format_size(self.stats['bytes_deleted'])}")
+        self.logger.info(f"Jira flags set:         {self.stats['jira_flags_set']}")
         self.logger.info(f"Errors:                 {self.stats['errors']}")
         
         if self.test_mode:
@@ -691,6 +870,7 @@ Environment Variables Required:
   Jira Authentication:
     JIRA_USERNAME - Your Jira email address
     JIRA_API_KEY - API token
+    JIRA_SERVER - Jira server URL (default: https://aeadataeditors.atlassian.net)
 """
     )
     
